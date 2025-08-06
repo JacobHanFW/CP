@@ -1,4 +1,4 @@
-# coupang_crawler.py 수정
+# coupang_crawler.py - 완전 수정 버전
 import time
 import random
 import urllib.parse
@@ -12,6 +12,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 class CoupangCrawler:
     def __init__(self, platform="pc", incog=True, delay=8, headless=True):
         self.platform = platform
@@ -19,7 +23,6 @@ class CoupangCrawler:
         self.driver = None
         self.incog = incog
         self.headless = headless
-        # 더 안정적인 User-Agent 사용
         self.ua = self._get_stable_ua()
         self.win = "1920,1080" if platform == "pc" else "412,915"
 
@@ -39,23 +42,17 @@ class CoupangCrawler:
         if self.headless:
             options.add_argument("--headless=new")
         
-        # 안정성 옵션들
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-blink-features=AutomationControlled")
-        
-        # 성능 옵션들 (이미지는 유지)
         options.add_argument("--disable-web-security")
         options.add_argument("--ignore-certificate-errors")
         options.add_argument("--allow-running-insecure-content")
-        
-        # User-Agent 및 창 크기
         options.add_argument(f"--user-agent={self.ua}")
         options.add_argument(f"--window-size={self.win}")
         
-        # 탐지 우회
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
         
@@ -67,7 +64,6 @@ class CoupangCrawler:
             options = self._opts()
             self.driver = webdriver.Chrome(options=options)
             
-            # 웹드라이버 탐지 방지
             self.driver.execute_script(
                 "Object.defineProperty(navigator,'webdriver',{get:() => undefined});"
             )
@@ -75,9 +71,8 @@ class CoupangCrawler:
                 "Object.defineProperty(navigator,'plugins',{get:() => [1, 2, 3, 4, 5]});"
             )
             
-            # 타임아웃 설정
-            self.driver.set_page_load_timeout(45)  # 더 긴 타임아웃
-            self.driver.implicitly_wait(10)  # 암시적 대기 추가
+            self.driver.set_page_load_timeout(45)
+            self.driver.implicitly_wait(10)
             
             return True
         except Exception as e:
@@ -90,15 +85,11 @@ class CoupangCrawler:
             try:
                 self.driver.get(url)
                 
-                # 페이지 완전 로드 대기
                 WebDriverWait(self.driver, 20).until(
                     lambda driver: driver.execute_script("return document.readyState") == "complete"
                 )
                 
-                # 추가 대기 (JavaScript 렌더링 완료)
                 time.sleep(random.uniform(self.delay, self.delay + 3))
-                
-                # 상품 카드가 로드되었는지 확인
                 self._wait_for_products()
                 
                 return True
@@ -130,7 +121,7 @@ class CoupangCrawler:
                 except:
                     continue
         except:
-            pass  # 타임아웃되어도 계속 진행
+            pass
 
     def rank(self, kw, tgt_url, pages=5):
         """개선된 순위 검색"""
@@ -140,7 +131,6 @@ class CoupangCrawler:
         try:
             prod, item, vend = self._ids(tgt_url)
             
-            # 검색 URL 생성
             if self.platform == "android":
                 base = "https://m.coupang.com/nm/search?q="
             else:
@@ -152,20 +142,15 @@ class CoupangCrawler:
                 if not self._load(url):
                     continue
                 
-                # HTML 파싱
                 soup = BeautifulSoup(self.driver.page_source, "html.parser")
-                
-                # 플랫폼별 상품 카드 찾기
                 cards = self._find_product_cards(soup)
                 
                 if not cards:
                     logger.warning(f"상품 카드를 찾을 수 없습니다. 페이지 {p}")
-                    # 페이지 소스 일부 출력 (디버깅용)
                     page_text = soup.get_text()[:500]
                     logger.info(f"페이지 내용 샘플: {page_text}")
                     continue
                 
-                # 순위 계산
                 result = self._calculate_rank(cards, kw, p, prod, item, vend)
                 if result:
                     self.driver.quit()
@@ -212,7 +197,6 @@ class CoupangCrawler:
         idx = 0
         
         for c in cards:
-            # 광고 필터링 (더 포괄적)
             ad_indicators = [
                 "span.ad-badge", 
                 "div.AdMark_adMark__KPMsC",
@@ -229,10 +213,8 @@ class CoupangCrawler:
             
             idx += 1
             
-            # ID 추출 (더 포괄적)
             ids = self._extract_product_ids(c)
             
-            # 매칭 확인
             if self._is_match(ids, prod, item, vend):
                 name_txt = self._extract_product_name(c)
                 
@@ -255,7 +237,6 @@ class CoupangCrawler:
             'vendor_id': card.get("data-vendor-item-id", card.get("data-id", ""))
         }
         
-        # 링크에서도 ID 추출
         link = card.find("a", href=True)
         if link and link.get("href"):
             href = link["href"]
@@ -308,7 +289,6 @@ class CoupangCrawler:
         
         return "상품명 추출 실패"
 
-    # 기존 메서드들 유지
     @staticmethod
     def _ids(url):
         """URL에서 상품 ID 추출"""
