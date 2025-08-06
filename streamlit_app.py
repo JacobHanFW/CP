@@ -1,14 +1,14 @@
-# streamlit_app.py
+# streamlit_app.py - 실시간 로그 표시 버전
 import streamlit as st
 import pandas as pd
 import time
 import random
-from datetime import datetime
 import threading
-import queue
-
-# 기존 CoupangCrawler 클래스 그대로 사용
-from coupang_crawler import CoupangCrawler  # 기존 클래스 임포트
+import logging
+import io
+import sys
+from datetime import datetime
+from coupang_crawler import CoupangCrawler
 
 # Streamlit 설정
 st.set_page_config(
@@ -17,14 +17,48 @@ st.set_page_config(
     layout="wide"
 )
 
+# 로그 캡처 설정
+class StreamlitLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.log_records = []
+        
+    def emit(self, record):
+        log_entry = self.format(record)
+        self.log_records.append({
+            'time': datetime.now().strftime("%H:%M:%S"),
+            'level': record.levelname,
+            'message': log_entry
+        })
+        
+    def get_logs(self):
+        return self.log_records.copy()
+        
+    def clear_logs(self):
+        self.log_records.clear()
+
+# 전역 로그 핸들러
+if 'log_handler' not in st.session_state:
+    st.session_state.log_handler = StreamlitLogHandler()
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    st.session_state.log_handler.setFormatter(formatter)
+    
+    # coupang_crawler 로거에 핸들러 추가
+    crawler_logger = logging.getLogger('coupang_crawler')
+    crawler_logger.addHandler(st.session_state.log_handler)
+    crawler_logger.setLevel(logging.INFO)
+
+# 메인 UI
 st.title("🛒 쿠팡 순위 추적기")
-st.markdown("**IP 분산을 통한 안전한 크롤링 서비스**")
+st.markdown("**IP 분산을 통한 안전한 크롤링 서비스 (디버깅 강화 버전)**")
 
 # 세션 상태 초기화
 if 'results' not in st.session_state:
     st.session_state.results = []
 if 'is_running' not in st.session_state:
     st.session_state.is_running = False
+if 'current_logs' not in st.session_state:
+    st.session_state.current_logs = []
 
 # 메인 입력 섹션
 col1, col2 = st.columns([2, 1])
@@ -54,19 +88,102 @@ with col2:
     platform_options = st.multiselect(
         "플랫폼 선택",
         ["PC", "Android"],
-        default=["PC", "Android"]
+        default=["PC"]
     )
     
     # 딜레이 설정
-    delay = st.slider("요청 간 딜레이 (초)", 5, 15, 8)
+    delay = st.slider("요청 간 딜레이 (초)", 5, 15, 10)
     
     # 페이지 수
-    pages = st.slider("검색할 페이지 수", 1, 10, 5)
+    pages = st.slider("검색할 페이지 수", 1, 10, 3)
     
     # 백그라운드 실행
     headless = st.checkbox("백그라운드 실행", value=True)
+    
+    # 디버깅 옵션
+    debug_mode = st.checkbox("상세 디버깅 모드", value=True)
 
-# 검색 실행 버튼
+# 실시간 로그 표시 영역
+if debug_mode:
+    st.subheader("🔍 실시간 디버깅 로그")
+    log_container = st.container()
+    with log_container:
+        log_placeholder = st.empty()
+
+# 검색 실행 함수
+def run_search():
+    """검색 실행 함수"""
+    keyword_list = [kw.strip() for kw in keywords.split('\n') if kw.strip()]
+    platform_list = [p.lower() for p in platform_options]
+    
+    total_tasks = len(keyword_list) * len(platform_list)
+    completed_tasks = 0
+    
+    for platform in platform_list:
+        for keyword in keyword_list:
+            if not st.session_state.is_running:
+                break
+                
+            completed_tasks += 1
+            
+            # 현재 작업 상태 업데이트
+            progress = completed_tasks / total_tasks
+            st.session_state.progress_bar.progress(progress)
+            st.session_state.status_text.text(
+                f"진행 중: {platform.upper()} - {keyword} ({completed_tasks}/{total_tasks})"
+            )
+            
+            # 로그 초기화
+            st.session_state.log_handler.clear_logs()
+            
+            try:
+                # 크롤러 실행
+                crawler = CoupangCrawler(
+                    platform=platform,
+                    headless=headless,
+                    delay=delay
+                )
+                
+                result = crawler.rank(keyword, url_input, pages)
+                
+                # 결과 처리
+                if result:
+                    st.session_state.results.append(result)
+                    st.session_state.status_text.text(
+                        f"✅ {keyword}: {result['rank']}위 발견!"
+                    )
+                else:
+                    st.session_state.results.append({
+                        "keyword": keyword,
+                        "platform": platform,
+                        "rank": "미노출",
+                        "page": "-",
+                        "product": "-",
+                        "time": datetime.now().strftime("%H:%M:%S")
+                    })
+                    st.session_state.status_text.text(
+                        f"❌ {keyword}: 순위 없음"
+                    )
+                
+                # 실시간 결과 업데이트
+                if st.session_state.results:
+                    df = pd.DataFrame(st.session_state.results)
+                    st.session_state.results_placeholder.dataframe(df, use_container_width=True)
+                
+                # 딜레이
+                time.sleep(random.uniform(2, 4))
+                
+            except Exception as e:
+                error_msg = f"오류 발생 ({keyword}): {str(e)}"
+                st.session_state.status_text.text(error_msg)
+                st.error(error_msg)
+    
+    # 완료 처리
+    st.session_state.is_running = False
+    st.session_state.progress_bar.progress(1.0)
+    st.session_state.status_text.text("✅ 검색 완료!")
+
+# 검색 시작 버튼
 if st.button("🔍 검색 시작", type="primary", disabled=st.session_state.is_running):
     if not url_input or not keywords:
         st.error("상품 URL과 키워드를 모두 입력해주세요.")
@@ -77,78 +194,45 @@ if st.button("🔍 검색 시작", type="primary", disabled=st.session_state.is_
         st.session_state.is_running = True
         st.session_state.results = []
         
-        # 진행 상황 표시
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # UI 요소들 생성
+        st.session_state.progress_bar = st.progress(0)
+        st.session_state.status_text = st.empty()
+        st.session_state.results_placeholder = st.empty()
         
-        # 키워드 리스트 생성
-        keyword_list = [kw.strip() for kw in keywords.split('\n') if kw.strip()]
-        platform_list = [p.lower() for p in platform_options]
-        
-        total_tasks = len(keyword_list) * len(platform_list)
-        completed_tasks = 0
-        
-        # 결과 테이블 미리 생성
-        results_placeholder = st.empty()
-        
-        # 크롤링 실행
-        for platform in platform_list:
-            for keyword in keyword_list:
-                if st.session_state.is_running:  # 중지 체크
-                    completed_tasks += 1
-                    progress = completed_tasks / total_tasks
-                    
-                    progress_bar.progress(progress)
-                    status_text.text(f"진행 중: {platform.upper()} - {keyword} ({completed_tasks}/{total_tasks})")
-                    
-                    try:
-                        # 크롤러 실행
-                        crawler = CoupangCrawler(
-                            platform=platform,
-                            headless=headless,
-                            delay=delay
-                        )
-                        
-                        result = crawler.rank(keyword, url_input, pages)
-                        
-                        if result:
-                            st.session_state.results.append(result)
-                        else:
-                            # 결과 없을 때도 기록
-                            st.session_state.results.append({
-                                "keyword": keyword,
-                                "platform": platform,
-                                "rank": "미노출",
-                                "page": "-",
-                                "product": "-",
-                                "time": datetime.now().strftime("%H:%M:%S")
-                            })
-                        
-                        # 실시간 결과 업데이트
-                        if st.session_state.results:
-                            df = pd.DataFrame(st.session_state.results)
-                            results_placeholder.dataframe(df, use_container_width=True)
-                        
-                        # 딜레이
-                        time.sleep(random.uniform(2, 4))
-                        
-                    except Exception as e:
-                        st.error(f"오류 발생: {str(e)}")
-                        break
-        
-        # 완료 처리
-        st.session_state.is_running = False
-        progress_bar.progress(1.0)
-        status_text.text("✅ 검색 완료!")
-        
-        if st.session_state.results:
-            st.success(f"총 {len(st.session_state.results)}개의 결과를 찾았습니다.")
+        # 별도 스레드에서 검색 실행
+        search_thread = threading.Thread(target=run_search, daemon=True)
+        search_thread.start()
 
 # 중지 버튼
 if st.session_state.is_running:
     if st.button("⏹️ 중지", type="secondary"):
         st.session_state.is_running = False
         st.warning("검색이 중지되었습니다.")
+
+# 실시간 로그 업데이트
+if debug_mode and st.session_state.is_running:
+    current_logs = st.session_state.log_handler.get_logs()
+    
+    if current_logs:
+        # 최근 로그부터 표시
+        log_text = ""
+        for log_entry in current_logs[-50:]:  # 최근 50개만 표시
+            level_emoji = {
+                'INFO': 'ℹ️',
+                'WARNING': '⚠️',
+                'ERROR': '❌',
+                'DEBUG': '🔧'
+            }.get(log_entry['level'], '📝')
+            
+            log_text += f"{log_entry['time']} {level_emoji} {log_entry['message']}\n"
+        
+        with log_placeholder.container():
+            st.text_area(
+                "실시간 로그", 
+                value=log_text, 
+                height=300, 
+                key=f"log_area_{len(current_logs)}"
+            )
 
 # 결과 표시
 if st.session_state.results:
@@ -170,7 +254,7 @@ if st.session_state.results:
     )
     
     # 통계 정보
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         found_count = len([r for r in st.session_state.results if r['rank'] != '미노출'])
@@ -182,10 +266,16 @@ if st.session_state.results:
     
     with col3:
         if found_count > 0:
-            avg_rank = sum([int(r['rank']) for r in st.session_state.results if r['rank'] != '미노출']) / found_count
+            valid_ranks = [int(r['rank']) for r in st.session_state.results if r['rank'] != '미노출']
+            avg_rank = sum(valid_ranks) / len(valid_ranks)
             st.metric("평균 순위", f"{avg_rank:.1f}위")
         else:
             st.metric("평균 순위", "N/A")
+    
+    with col4:
+        total_searches = len(st.session_state.results)
+        success_rate = (found_count / total_searches * 100) if total_searches > 0 else 0
+        st.metric("성공률", f"{success_rate:.1f}%")
 
 # 사이드바 정보
 with st.sidebar:
@@ -196,11 +286,10 @@ with st.sidebar:
     - 개인 IP 노출 없음
     - 자동 트래픽 분산
     
-    **사용 방법:**
-    1. 쿠팡 상품 URL 입력
-    2. 검색할 키워드 입력
-    3. 플랫폼과 옵션 선택
-    4. 검색 시작
+    **디버깅 기능:**
+    - 실시간 로그 표시
+    - 스크린샷 자동 저장
+    - 상세 진행 상황 추적
     """)
     
     st.header("📈 실시간 상태")
@@ -209,6 +298,42 @@ with st.sidebar:
     else:
         st.info("🔵 대기 중")
     
-    st.header("🔧 서버 정보")
+    st.header("🔧 디버깅 정보")
     st.text(f"서버 시간: {datetime.now().strftime('%H:%M:%S')}")
     st.text("IP 보호: ✅ 활성")
+    st.text("로그 레벨: INFO")
+    st.text("스크린샷: ✅ 활성")
+    
+    if st.session_state.results:
+        st.header("📊 실행 통계")
+        total_searches = len(st.session_state.results)
+        found_count = len([r for r in st.session_state.results if r['rank'] != '미노출'])
+        st.text(f"총 검색: {total_searches}개")
+        st.text(f"순위 발견: {found_count}개")
+        
+        if total_searches > 0:
+            success_rate = (found_count / total_searches * 100)
+            st.text(f"성공률: {success_rate:.1f}%")
+
+# 하단 디버깅 정보
+if debug_mode and st.session_state.results:
+    with st.expander("🔍 상세 디버깅 정보"):
+        st.write("**검색 환경:**")
+        st.write(f"- 서버: Streamlit Cloud")
+        st.write(f"- 헤드리스 모드: {headless}")
+        st.write(f"- 딜레이 설정: {delay}초")
+        st.write(f"- 검색 페이지: {pages}페이지")
+        
+        # 실패한 검색 분석
+        failed_searches = [r for r in st.session_state.results if r['rank'] == '미노출']
+        if failed_searches:
+            st.write(f"**미노출 키워드 분석 ({len(failed_searches)}개):**")
+            for fail in failed_searches:
+                st.write(f"- {fail['keyword']} ({fail['platform']})")
+        
+        # 성공한 검색 분석
+        success_searches = [r for r in st.session_state.results if r['rank'] != '미노출']
+        if success_searches:
+            st.write(f"**순위 발견 키워드 ({len(success_searches)}개):**")
+            for success in success_searches:
+                st.write(f"- {success['keyword']}: {success['rank']}위 ({success['platform']})")
